@@ -6,38 +6,86 @@ from langchain_core.messages import HumanMessage, SystemMessage
 load_dotenv()
 
 
+from google import genai
+from google.genai import types
+from langchain_core.embeddings import Embeddings
+
+
+class GoogleAIStudioEmbeddings(Embeddings):
+    def __init__(self, model="gemini-embedding-001", output_dimensionality=768):
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("Set GOOGLE_API_KEY in your environment (or .env)")
+
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+        self.output_dimensionality = output_dimensionality
+
+    def _normalize(self, vec):
+        norm = sum(x * x for x in vec) ** 0.5
+        return vec if norm == 0 else [x / norm for x in vec]
+
+    def embed_documents(self, texts):
+        result = self.client.models.embed_content(
+            model=self.model,
+            contents=texts,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=self.output_dimensionality,
+            ),
+        )
+        return [self._normalize(e.values) for e in result.embeddings]
+
+    def embed_query(self, text):
+        result = self.client.models.embed_content(
+            model=self.model,
+            contents=text,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=self.output_dimensionality,
+            ),
+        )
+        return self._normalize(result.embeddings[0].values)
+
+
 def get_embedding_model():
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if api_key is None:
-        raise ValueError("Set GOOGLE_API_KEY or OPENAI_API_KEY in environment")
-
-    os.environ.setdefault("OPENAI_API_KEY", api_key)
-
-    try:
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-        return GoogleGenerativeAIEmbeddings(model=os.getenv("GOOGLE_EMBEDDING_MODEL", "models/embedding-001"))
-    except Exception:
-        pass
-
-    from langchain_openai import OpenAIEmbeddings
-    return OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"))
+    return GoogleAIStudioEmbeddings(
+        model=os.getenv("GOOGLE_EMBEDDING_MODEL", "gemini-embedding-001"),
+        output_dimensionality=int(os.getenv("GOOGLE_EMBEDDING_DIM", "768")),
+    )
 
 
 def get_chat_model():
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if api_key is None:
-        raise ValueError("Set GOOGLE_API_KEY or OPENAI_API_KEY in environment")
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("Set GOOGLE_API_KEY in environment")
 
-    os.environ.setdefault("OPENAI_API_KEY", api_key)
+    client = genai.Client(api_key=api_key)
+    model_name = os.getenv("GOOGLE_CHAT_MODEL", "models/gemini-flash-latest")
 
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(model=os.getenv("GOOGLE_CHAT_MODEL", "gemini-1.5-flash"), temperature=0)
-    except Exception:
-        pass
+    class GoogleChat:
+        def __init__(self, client, model):
+            self.client = client
+            self.model = model
 
-    from langchain_openai import ChatOpenAI
-    return ChatOpenAI(model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o"), temperature=0)
+        def _extract_text(self, response):
+            if not response.candidates:
+                return ""
+            candidate = response.candidates[0]
+            if candidate.content is None:
+                return ""
+            if candidate.content.parts:
+                return "".join((part.text or "") for part in candidate.content.parts if getattr(part, "text", None))
+            return ""
+        def invoke(self, messages):
+            prompt = "\n".join([m.content for m in messages if hasattr(m, "content")])
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+            )
+            return type("x", (), {"content": self._extract_text(response)})()
+
+    return GoogleChat(client, model_name)
 
 
 def load_vector_store(persist_directory="db/chroma_db"):

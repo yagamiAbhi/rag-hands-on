@@ -7,29 +7,53 @@ from langchain_chroma import Chroma
 load_dotenv()
 
 
+from google import genai
+from google.genai import types
+from langchain_core.embeddings import Embeddings
+
+
+class GoogleAIStudioEmbeddings(Embeddings):
+    def __init__(self, model="gemini-embedding-001", output_dimensionality=768):
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("Set GOOGLE_API_KEY in your environment (or .env)")
+
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+        self.output_dimensionality = output_dimensionality
+
+    def _normalize(self, vec):
+        norm = sum(x * x for x in vec) ** 0.5
+        return vec if norm == 0 else [x / norm for x in vec]
+
+    def embed_documents(self, texts):
+        result = self.client.models.embed_content(
+            model=self.model,
+            contents=texts,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=self.output_dimensionality,
+            ),
+        )
+        return [self._normalize(e.values) for e in result.embeddings]
+
+    def embed_query(self, text):
+        result = self.client.models.embed_content(
+            model=self.model,
+            contents=text,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=self.output_dimensionality,
+            ),
+        )
+        return self._normalize(result.embeddings[0].values)
+
+
 def get_embedding_model():
-    """Return embeddings model; prefer Google Palm (Studio) and fallback to OpenAI."""
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if api_key is None:
-        raise ValueError("Set GOOGLE_API_KEY or OPENAI_API_KEY in your environment (or .env)")
-
-    # If using Google AI Studio key, mirror to OPENAI_API_KEY to support OpenAI-style wrappers.
-    os.environ.setdefault("OPENAI_API_KEY", api_key)
-
-    # Try Google Generative AI from langchain-google-genai
-    try:
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
-        print("Using GoogleGenerativeAIEmbeddings for embedding")
-        return GoogleGenerativeAIEmbeddings(model=os.getenv("GOOGLE_EMBEDDING_MODEL", "models/embedding-001"))
-    except Exception:
-        pass
-
-    # Fallback to OpenAI embeddings for compatibility with existing sample
-    from langchain_openai import OpenAIEmbeddings
-
-    print("Using OpenAIEmbeddings fallback")
-    return OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"))
+    return GoogleAIStudioEmbeddings(
+        model=os.getenv("GOOGLE_EMBEDDING_MODEL", "gemini-embedding-001"),
+        output_dimensionality=int(os.getenv("GOOGLE_EMBEDDING_DIM", "768")),
+    )
 
 
 def load_documents(docs_path="docs"):
